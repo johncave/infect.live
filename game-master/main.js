@@ -31,52 +31,81 @@ socket.on('connect', function (info) {
     console.log('Connected to socket server!');
 });
 socket.on('join', function (info) {
-    console.log('User joined', info, info.userId)
-    // Register the user
-    let row = db.prepare('INSERT OR REPLACE INTO player(id) VALUES (?)').run(info.userId)
-    // Join the user to the game
-    console.log("Registered user", row)
+    try {
+        console.log('User joined', info, info.userId)
+        // Register the user
+        let row = db.prepare('INSERT OR REPLACE INTO player(id) VALUES (?)').run(info.userId)
+        // Join the user to the game
+        console.log("Registered user", row)
 
-    // Check if a game is in progress
-    let game = db.prepare("SELECT * FROM game WHERE state = 'in_progress'").get()
-    console.log("Game", game)
-    let gameid = 0
-    let first_player = false
-    if (game == undefined) { // No game?
-        let newgame = db.prepare("INSERT into game(state, started) VALUES ('in_progress', ?)").run(currentTime())
-        console.log("Created game", newgame)
-        gameid = newgame.lastInsertRowid
-        game = newgame
-        first_player = true
-    } else {
-        gameid = game.id
-    }
+        // Check if a game is in progress
+        let game = db.prepare("SELECT * FROM game WHERE state = 'in_progress'").get()
+        console.log("Game", game)
+        let gameid = 0
+        let first_player = false
+        if (game == undefined) { // No game?
+            let newgame = db.prepare("INSERT into game(state, started) VALUES ('in_progress', ?)").run(currentTime())
+            console.log("Created game", newgame)
 
-    let player_joined = db.prepare("SELECT * from game_players WhERE player_id = ? AND game_id = ?").get(info.userId, gameid)
-    if (player_joined === undefined) {
-        // Assign the new player to the smallest team
-        let counts = db.prepare("select (SELECT count(1) FROM game_players WHERE game_id = ? AND state = 'humans') as humans, (SELECT count(1) FROM game_players WHERE game_id = ? AND state = 'zombies') as zombies").get(game.id, game.id)
-        console.log("counts", counts)
-        let state = "zombies"
-        if (counts.humans < counts.zombies) {
-            state = "humans"
+            socket.emit("newgame", newgame)
+
+            gameid = newgame.lastInsertRowid
+            game = newgame
+            first_player = true
+        } else {
+            gameid = game.id
         }
 
-        console.log("Assigning user to team", state, first_player)
+        let player_joined = db.prepare("SELECT * from game_players WhERE player_id = ? AND game_id = ?").get(info.userId, gameid)
+        if (player_joined === undefined) {
+            // Assign the new player to the smallest team
+            let counts = db.prepare("select (SELECT count(1) FROM game_players WHERE game_id = ? AND state = 'humans') as humans, (SELECT count(1) FROM game_players WHERE game_id = ? AND state = 'zombies') as zombies").get(game.id, game.id)
+            console.log("counts", counts)
+            let state = "zombies"
+            if (counts.humans < counts.zombies) {
+                state = "humans"
+            }
 
-        // Register the player to the game 
-        let p2g = db.prepare("INSERT INTO game_players(game_id, player_id, score, total_score, state, join_time) VALUES (?, ?, 0, 0, ?, ?)").run(gameid, info.userId, state, currentTime())
-        console.log("Added user to game", p2g)
-    } else {
-        console.log("Player already in-game")
+            console.log("Assigning user to team", state, first_player)
+
+            // Register the player to the game 
+            let p2g = db.prepare("INSERT INTO game_players(game_id, player_id, score, total_score, state, join_time) VALUES (?, ?, 0, 0, ?, ?)").run(gameid, info.userId, state, currentTime())
+            console.log("Added user to game", p2g)
+        } else {
+            console.log("Player already in-game")
+        }
+    } catch (e) {
+        console.log("Fatal error!", e)
     }
-
 });
+
+socket.on("leave", function (info) {
+    try {
+        console.log("User left", info)
+
+        let game = db.prepare("SELECT * from game where state = 'in_progress'").get()
+        console.log("Game", game)
+        if (game === undefined) {
+            console.log("No game in progress - ignoring leave")
+            return
+        }
+
+        // let player = db.prepare("SELECT * from game_players WHERE player_id = ? AND game_id = ?").get(info.userId, game.id)
+        // console.log("Player", player)
+
+        let update = db.prepare("DELETE FROM game_players WHERE player_id = ? AND game_id = ?").run(info.userId, game.id)
+        console.log("Player left")
+    } catch (e) {
+        console.log("Fatal error!", e)
+    }
+})
+
 socket.on('scan', function (info) {
+    try {
     console.log('User scanned', info)
     let game = db.prepare("SELECT * from game where state = 'in_progress'").get()
     console.log("Game", game)
-    if ( game === undefined ) {
+    if (game === undefined) {
         console.log("No game in progress - ignoring scan")
         return
     }
@@ -88,15 +117,17 @@ socket.on('scan', function (info) {
     console.log("Target", target)
 
 
-    if (player.state != target.state) {
-        let update = db.prepare("update game_players SET state = ? WHERE player_id = ? AND game_id = ?").run(player.state, info.targetId, game.id)
+    if (target !== undefined && player.state != target.state) {
+        let update = db.prepare("update game_players SET state = ?, score = 0, total_score = total_score - 1 WHERE player_id = ? AND game_id = ?").run(player.state, info.targetId, game.id)
         let player_update = db.prepare("update game_players set score = score + 1, total_score = total_score + 1 WHERE player_id = ?").run(player.player_id)
         let scan = db.prepare("INSERT INTO scan(player_id, target_id, game_id, result, time) VALUES (?, ?, ?, ?, ?)").run(info.userId, info.targetId, game.id, player.state, currentTime())
         console.log("Scan recorded")
     } else {
         console.log("Scan ignored - already on same team")
     }
-
+    } catch (e) {
+        console.log("Fatal error!", e)
+    }
 });
 
 setInterval(function () {
@@ -108,10 +139,10 @@ setInterval(function () {
             game = db.prepare("select * from game order by started DESC LIMIT 1").get()
             gameover = true
         } else { // If there is a game in progress, check if it should be over
-            console.log("game", game)
+            //console.log("game", game)
             let counts = db.prepare("select (SELECT count(1) FROM game_players WHERE game_id = ? AND state = 'humans') as humans, (SELECT count(1) FROM game_players WHERE game_id = ? AND state = 'zombies') as zombies").get(game.id, game.id)
-            console.log("counts", counts)
-            if ((counts.humans + counts.zombies) > 2 && (counts.zombies == 0 || counts.humans == 0)) {
+            //console.log("counts", counts)
+            if ((counts.humans + counts.zombies) >= 2 && (counts.zombies == 0 || counts.humans == 0)) {
                 let endgame = db.prepare("UPDATE game SET state = 'done' WHERE id = ?").run(game.id)
                 console.log("End game!")
                 gameover = true
@@ -142,8 +173,9 @@ setInterval(function () {
         })
 
         //console.log(players)
+        console.log(gameover, out)
         socket.emit('state', {
-            gameID: game.id,
+            gameId: game.id,
             gameOver: gameover,
             players: out,
             scans: scans_out,
